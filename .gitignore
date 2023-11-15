@@ -1,6 +1,8 @@
 # Some junk folders
 __pycache__/
 .vscode/
+GSAT/
+Revision/
 
 # Experimental data: e.g., model weights, etc.
 models/
