@@ -4,6 +4,8 @@ __pycache__/
 GSAT/
 Revision/
 Datasets/
+bugfix/
+Reference_projects/
 
 # Experimental data: e.g., model weights, etc.
 models/
