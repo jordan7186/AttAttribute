@@ -566,9 +566,12 @@ def return_edges_in_k_hop(
     return data.edge_index[:, inv].t().tolist()
 
 
-from typing import Tuple, Dict
 
-def attattribute(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict) -> float:
+
+def attattribute(target_edge: Tuple, 
+                ref_node: int,
+                att_matrix_dict: Dict, 
+                correction_matrix_dict: Optional[Dict] = None) -> float:
     """
     Calculates the AttAttribute score for a given target edge and reference node.
     """
@@ -585,15 +588,20 @@ def attattribute(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict) -> fl
         result = att_matrix_dict[1][ref_node, tgt_idx] * att_matrix_dict[0][tgt_idx, src_idx]
         result += att_matrix_dict[1][tgt_idx, src_idx] if tgt_idx == ref_node else 0
     elif num_of_hops == 3:
-        result = (torch.sparse.mm(att_matrix_dict[2], att_matrix_dict[1]))[ref_node, tgt_idx].item() * att_matrix_dict[0][tgt_idx, src_idx]
+        # Assuming correction_matrix_dict[0] is (torch.sparse.mm(att_matrix_dict[2], att_matrix_dict[1])) 
+        result = correction_matrix_dict[0][ref_node, tgt_idx].item() * att_matrix_dict[0][tgt_idx, src_idx]
         result += att_matrix_dict[2][ref_node, tgt_idx] * att_matrix_dict[1][tgt_idx, src_idx]
         result += att_matrix_dict[2][tgt_idx, src_idx] if tgt_idx == ref_node else 0
     else:
         raise NotImplementedError("This function only supports up to 3-hop attention.")
     
-    return result
+    return result.item()
 
-def attattribute_sim(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict, att_matrix_dict_sim: Dict) -> float:
+def attattribute_sim(target_edge: Tuple, 
+                    ref_node: int, 
+                    att_matrix_dict: Dict, 
+                    att_matrix_dict_sim: Dict, 
+                    correction_matrix_dict: Optional[Dict] = None) -> float:
     """
     Calculates the AttAttribute_sim score for a given target edge and reference node.
     """
@@ -610,13 +618,14 @@ def attattribute_sim(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict, a
         result = att_matrix_dict_sim[1][ref_node, tgt_idx] * att_matrix_dict[0][tgt_idx, src_idx]
         result += att_matrix_dict[1][tgt_idx, src_idx] if tgt_idx == ref_node else 0
     elif num_of_hops == 3:
-        result = (torch.sparse.mm(att_matrix_dict_sim[2], att_matrix_dict_sim[1]))[ref_node, tgt_idx].item() * att_matrix_dict[0][tgt_idx, src_idx]
+        # Assuming correction_matrix_dict[0] is (torch.sparse.mm(att_matrix_dict_sim[2], att_matrix_dict_sim[1]))
+        result = correction_matrix_dict[0][ref_node, tgt_idx].item() * att_matrix_dict[0][tgt_idx, src_idx]
         result += att_matrix_dict_sim[2][ref_node, tgt_idx] * att_matrix_dict[1][tgt_idx, src_idx]
         result += att_matrix_dict[2][tgt_idx, src_idx] if tgt_idx == ref_node else 0
     else:
         raise NotImplementedError("This function only supports up to 3-hop attention.")
     
-    return result
+    return result.item()
 
 def avgatt(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict) -> float:
     """
@@ -638,10 +647,10 @@ def avgatt(target_edge: Tuple, ref_node: int, att_matrix_dict: Dict) -> float:
     else:
         raise NotImplementedError("This function only supports up to 3-hop attention.")
     
-    return result
+    return result.item()
 
 @torch.no_grad()
-def generate_att_dict(model, data) -> Dict:
+def generate_att_dict(model, data, sparse: bool = True) -> Dict:
     """
     Generates a dictionary of attention matrices from a model.
     """
@@ -650,11 +659,18 @@ def generate_att_dict(model, data) -> Dict:
     att = model.att
     att_matrix_dict = {}
     for idx, att_info in enumerate(att):
-        att_matrix_dict[idx] = torch.sparse_coo_tensor(att_info[0], att_info[1].squeeze(), size=(num_nodes, num_nodes)).t()
+        if sparse:
+            att_matrix_dict[idx] = torch.sparse_coo_tensor(att_info[0], 
+                                                        att_info[1].mean(dim=1).squeeze(), 
+                                                        size=(num_nodes, num_nodes)).t()
+        else:
+            att_matrix_dict[idx] = torch.zeros((num_nodes, num_nodes))
+            # Already transposed
+            att_matrix_dict[idx][att_info[0][1], att_info[0][0]] = att_info[1].mean(dim=1).squeeze()
     return att_matrix_dict
 
 @torch.no_grad()
-def generate_att_dict_sim(model, data) -> Dict:    
+def generate_att_dict_sim(model, data, sparse: bool = True) -> Dict:    
     """
     Generates a dictionary of attention matrices from a model.
     """
@@ -663,5 +679,59 @@ def generate_att_dict_sim(model, data) -> Dict:
     att = model.att
     att_matrix_dict_sim = {}
     for idx, att_info in enumerate(att):
-        att_matrix_dict_sim[idx] = torch.sparse_coo_tensor(att_info[0], torch.ones_like(att_info[1].squeeze()), size=(num_nodes, num_nodes)).t()
+        if sparse:
+            att_matrix_dict_sim[idx] = torch.sparse_coo_tensor(att_info[0], 
+                                                        torch.ones_like(att_info[1].mean(dim=1).squeeze()), 
+                                                        size=(num_nodes, num_nodes)).t()
+        else:
+            att_matrix_dict_sim[idx] = torch.zeros((num_nodes, num_nodes))
+            # Already transposed
+            att_matrix_dict_sim[idx][att_info[0][1], att_info[0][0]] = torch.ones_like(att_info[1].mean(dim=1).squeeze())
     return att_matrix_dict_sim
+
+def attattribute_batch(ref_node: int,
+                att_matrix_dict: Dict, 
+                correction_matrix_dict: Optional[Dict] = None) -> torch.Tensor:
+    # Get the number of hops
+    num_of_hops = len(att_matrix_dict)
+    
+    select_matrix = torch.zeros_like(att_matrix_dict[0])
+    select_matrix[ref_node, :] = 1
+    
+    if num_of_hops == 1:
+        result_matrix = select_matrix * att_matrix_dict[0]
+    elif num_of_hops == 2:
+        result_matrix = att_matrix_dict[1][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[0] +\
+                        select_matrix * att_matrix_dict[1]
+    elif num_of_hops == 3:
+        result_matrix = correction_matrix_dict[0][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[0] +\
+                        att_matrix_dict[2][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[1] +\
+                        select_matrix * att_matrix_dict[2]
+    else:
+        raise NotImplementedError("This function only supports up to 3-hop attention.")
+    
+    return result_matrix
+
+def attattribute_sim_batch(ref_node: int,
+                att_matrix_dict: Dict, 
+                att_matrix_dict_sim: Dict, 
+                correction_matrix_dict: Optional[Dict] = None) -> torch.Tensor:
+    # Get the number of hops
+    num_of_hops = len(att_matrix_dict)
+    
+    select_matrix = torch.zeros_like(att_matrix_dict[0])
+    select_matrix[ref_node, :] = 1
+    
+    if num_of_hops == 1:
+        result_matrix = select_matrix * att_matrix_dict[0]
+    elif num_of_hops == 2:
+        result_matrix = att_matrix_dict_sim[1][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[0] +\
+                        select_matrix * att_matrix_dict[1]
+    elif num_of_hops == 3:
+        result_matrix = correction_matrix_dict[0][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[0] +\
+                        att_matrix_dict_sim[2][ref_node, :].expand_as(att_matrix_dict[0]).t() * att_matrix_dict[1] +\
+                        select_matrix * att_matrix_dict[2]
+    else:
+        raise NotImplementedError("This function only supports up to 3-hop attention.")
+    
+    return result_matrix
